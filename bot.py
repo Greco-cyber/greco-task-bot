@@ -3,132 +3,131 @@ import os
 import asyncpg
 import aiohttp
 from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters.state import State, StatesGroup
+from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 from datetime import datetime
 
 API_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY") or "7c50670f4a42d50802416f17b95682e1"
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
+storage = MemoryStorage()
+dp = Dispatcher(bot, storage=storage)
 scheduler = AsyncIOScheduler()
 
-# Создание таблиц
+class ScheduleForm(StatesGroup):
+    recurring = State()
+    weekday = State()
+    date = State()
+    time = State()
+    description = State()
+
 async def create_tables():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             chat_id BIGINT,
-            task TEXT
-        );
+            task TEXT,
+            is_recurring BOOLEAN DEFAULT FALSE,
+            weekday TEXT,
+            date TIMESTAMP,
+            time TEXT
+        )
     """)
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS weather_subscribers (
-            chat_id BIGINT PRIMARY KEY
-        );
-    """)
     await conn.close()
 
-# Получение прогноза погоды
-async def get_forecast():
-    lat, lon = 50.4084, 30.3654  # Софиевская Борщаговка
-    url = f"https://api.openweathermap.org/data/2.5/forecast?lat={lat}&lon={lon}&units=metric&lang=ua&appid={WEATHER_API_KEY}"
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            return await response.json()
+@dp.message_handler(commands=['schedule'])
+async def cmd_schedule(message: types.Message):
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("Однократно"), KeyboardButton("Повтор еженедельно"))
+    await message.answer("🔁 Вибери тип задачі:", reply_markup=kb)
+    await ScheduleForm.recurring.set()
 
-# Отправка прогноза
-async def send_forecast():
-    data = await get_forecast()
-    if "list" not in data:
-        return
-
-    intervals = ["12:00:00", "15:00:00", "18:00:00", "21:00:00"]
-    today = datetime.utcnow().date().isoformat()
-
-    forecasts = [entry for entry in data['list']
-                 if entry['dt_txt'].startswith(today)
-                 and any(t in entry['dt_txt'] for t in intervals)]
-
-    if not forecasts:
-        return
-
-    msg = "\u2600\ufe0f\u043f\u0440\u043e\u0433\u043d\u043e\u0437 \u043f\u043e\u0433\u043e\u0434\u0438 \u0443 \u0421\u043e\u0444\u0456\u0457\u0432\u0441\u044c\u043a\u0456\u0439 \u0411\u043e\u0440\u0449\u0430\u0433\u0456\u0432\u0446\u0456:\n\n"
-    for forecast in forecasts:
-        time = forecast['dt_txt'][11:16]
-        temp = forecast['main']['temp']
-        desc = forecast['weather'][0]['description'].capitalize()
-        msg += f"{time} — {desc}, {temp:.1f}°C\n"
-
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT chat_id FROM weather_subscribers")
-    for row in rows:
-        await bot.send_message(row['chat_id'], msg)
-    await conn.close()
-
-@dp.message_handler(commands=["start"])
-async def send_welcome(message: types.Message):
-    chat_id = message.chat.id
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("INSERT INTO tasks (chat_id, task) VALUES ($1, $2)", chat_id, "Полити каву")
-    await conn.execute("INSERT INTO weather_subscribers (chat_id) VALUES ($1) ON CONFLICT DO NOTHING", chat_id)
-    await conn.close()
-    await message.answer("\U0001F44B Привіт! Я бот задач для персоналу ресторану GRECO.")
-    await message.answer("\ud83d\uddd3\ufe0f Щопонеділка о 11:30 я буду надсилати задачі, а прогноз погоди щодня о 10:30, 13:30, 16:30, 20:30.")
-
-@dp.message_handler(commands=["task"])
-async def list_tasks(message: types.Message):
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT task FROM tasks WHERE chat_id = $1", message.chat.id)
-    await conn.close()
-    if not rows:
-        await message.answer("✅ У тебе немає активних задач!")
-        return
-    tasks = [r['task'] for r in rows]
-    buttons = [InlineKeyboardButton(text=f"✅ {t}", callback_data=f"done:{i}") for i, t in enumerate(tasks)]
-    markup = InlineKeyboardMarkup().add(*buttons)
-    await message.answer("📜 Список задач:", reply_markup=markup)
-
-@dp.callback_query_handler(lambda c: c.data and c.data.startswith("done:"))
-async def mark_done(callback_query: types.CallbackQuery):
-    idx = int(callback_query.data.split(":")[1])
-    chat_id = callback_query.message.chat.id
-    conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT task FROM tasks WHERE chat_id = $1", chat_id)
-    if idx < len(rows):
-        task = rows[idx]['task']
-        await conn.execute("DELETE FROM tasks WHERE chat_id = $1 AND task = $2", chat_id, task)
-        await bot.answer_callback_query(callback_query.id, text=f"Задача виконана: {task}")
-        await bot.send_message(chat_id, f"✅ Виконано: {task}")
+@dp.message_handler(state=ScheduleForm.recurring)
+async def choose_type(message: types.Message, state: FSMContext):
+    user_choice = message.text.strip()
+    if user_choice == "Повтор еженедельно":
+        await state.update_data(recurring=True)
+        kb = ReplyKeyboardMarkup(resize_keyboard=True)
+        for day in ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]:
+            kb.add(KeyboardButton(day))
+        await message.answer("📆 Обери день тижня (mon, tue...):", reply_markup=kb)
+        await ScheduleForm.weekday.set()
+    elif user_choice == "Однократно":
+        await state.update_data(recurring=False)
+        await message.answer("📅 Введи дату в форматі YYYY-MM-DD:", reply_markup=types.ReplyKeyboardRemove())
+        await ScheduleForm.date.set()
     else:
-        await bot.answer_callback_query(callback_query.id, text="Задача не знайдена.")
-    await conn.close()
+        await message.answer("❗ Будь ласка, обери один з варіантів.")
 
-@dp.message_handler(commands=["weather"])
-async def send_weather_command(message: types.Message):
-    await send_forecast()
-    conn = await asyncpg.connect(DATABASE_URL)
-    await conn.execute("INSERT INTO weather_subscribers (chat_id) VALUES ($1) ON CONFLICT DO NOTHING", message.chat.id)
-    await conn.close()
+@dp.message_handler(state=ScheduleForm.weekday)
+async def set_weekday(message: types.Message, state: FSMContext):
+    await state.update_data(weekday=message.text.strip())
+    await message.answer("🕐 Введи час у форматі HH:MM:")
+    await ScheduleForm.time.set()
 
-async def send_weekly_tasks():
+@dp.message_handler(state=ScheduleForm.date)
+async def set_date(message: types.Message, state: FSMContext):
+    try:
+        dt = datetime.strptime(message.text.strip(), "%Y-%m-%d")
+        await state.update_data(date=dt)
+        await message.answer("🕐 Введи час у форматі HH:MM:")
+        await ScheduleForm.time.set()
+    except ValueError:
+        await message.answer("❗ Неправильний формат дати. Спробуй ще раз (YYYY-MM-DD)")
+
+@dp.message_handler(state=ScheduleForm.time)
+async def set_time(message: types.Message, state: FSMContext):
+    await state.update_data(time=message.text.strip())
+    await message.answer("✍️ Введи опис задачі:")
+    await ScheduleForm.description.set()
+
+@dp.message_handler(state=ScheduleForm.description)
+async def save_task(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    chat_id = message.chat.id
+    task = message.text.strip()
+    time = data['time']
     conn = await asyncpg.connect(DATABASE_URL)
-    rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
-    for row in rows:
-        chat_id = row['chat_id']
-        await bot.send_message(chat_id, "👨‍🍳 ОФІЦІАНТИ: 🡢 Спецовники заповнені?")
-        await bot.send_message(chat_id, "🍸 БАРМЕНИ: 🧼 Фільтри чисті?")
+
+    if data['recurring']:
+        weekday = data['weekday']
+        await conn.execute("INSERT INTO tasks (chat_id, task, is_recurring, weekday, time) VALUES ($1, $2, TRUE, $3, $4)", chat_id, task, weekday, time)
+        scheduler.add_job(send_scheduled_task, CronTrigger(day_of_week=weekday, hour=int(time[:2]), minute=int(time[3:])), args=[chat_id, task])
+    else:
+        date = data['date']
+        run_time = datetime.combine(date, datetime.strptime(time, "%H:%M").time())
+        await conn.execute("INSERT INTO tasks (chat_id, task, is_recurring, date, time) VALUES ($1, $2, FALSE, $3, $4)", chat_id, task, run_time, time)
+        scheduler.add_job(send_scheduled_task, DateTrigger(run_date=run_time), args=[chat_id, task])
+
     await conn.close()
+    await message.answer("✅ Задачу збережено!", reply_markup=types.ReplyKeyboardRemove())
+    await state.finish()
+
+async def send_scheduled_task(chat_id, task):
+    await bot.send_message(chat_id, f"🔔 Нагадування: {task}")
 
 async def on_startup(dp):
     await create_tables()
-    scheduler.add_job(send_weekly_tasks, CronTrigger(day_of_week='mon', hour=11, minute=30))
-    for hour in [10, 13, 16, 19]:
-        scheduler.add_job(send_forecast, CronTrigger(hour=hour, minute=30))
+    # Загружаем запланированные задачи из БД
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT * FROM tasks")
+    for row in rows:
+        chat_id = row['chat_id']
+        task = row['task']
+        time = row['time']
+        if row['is_recurring']:
+            scheduler.add_job(send_scheduled_task, CronTrigger(day_of_week=row['weekday'], hour=int(time[:2]), minute=int(time[3:])), args=[chat_id, task])
+        else:
+            scheduler.add_job(send_scheduled_task, DateTrigger(run_date=row['date']), args=[chat_id, task])
+    await conn.close()
     scheduler.start()
 
 if __name__ == '__main__':
