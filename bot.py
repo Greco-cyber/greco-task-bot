@@ -3,19 +3,27 @@ import logging
 import os
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 API_TOKEN = os.getenv("BOT_TOKEN")
-
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 
 tasks = {}
+scheduler = AsyncIOScheduler()
+scheduler.start()
 
 @dp.message_handler(commands=["start"])
 async def send_welcome(message: types.Message):
-    tasks[message.chat.id] = ["Полити каву", "Помий барну стійку"]
+    chat_id = message.chat.id
+    tasks[chat_id] = ["Полити каву", "Помий барну стійку"]
     await message.answer("👋 Привіт! Я бот задач для персоналу ресторану GRECO.")
+
+    # Добавляем планировщик для текущего пользователя
+    scheduler.add_job(send_weekly_tasks, CronTrigger(day_of_week='mon', hour=11, minute=30), args=[chat_id])
+    await message.answer("📅 Щопонеділка о 11:30 я буду надсилати задачі для бару та залу.")
 
 @dp.message_handler(commands=["task"])
 async def list_tasks(message: types.Message):
@@ -37,6 +45,10 @@ async def mark_done(callback_query: types.CallbackQuery):
         await bot.send_message(chat_id, f"✅ Виконано: {task}")
     else:
         await bot.answer_callback_query(callback_query.id, text="Задача не знайдена.")
+
+async def send_weekly_tasks(chat_id):
+    await bot.send_message(chat_id, "👨‍🍳 ОФІЦІАНТИ: 🧂 Спецовники заповнені?")
+    await bot.send_message(chat_id, "🍸 БАРМЕНИ: 🧼 Фільтри чисті?")
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True)
