@@ -102,4 +102,8 @@ async def on_startup(dp):
     scheduler.start()
 
 if __name__ == '__main__':
+    @dp.message_handler(commands=["weather"])
+async def manual_weather(message: types.Message):
+    await send_weather()
+    await message.answer("☁️ Прогноз погоди відправлено!")
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
