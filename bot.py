@@ -16,8 +16,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 scheduler = AsyncIOScheduler()
 
-
-# Создание таблицы в БД
+# Создание таблиц
 async def create_tables():
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("""
@@ -26,11 +25,15 @@ async def create_tables():
             task TEXT
         )
     """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS weather_subscribers (
+            chat_id BIGINT PRIMARY KEY
+        )
+    """)
     await conn.close()
 
-
-# Погодная рассылка
-async def send_weather():
+# Получение погоды
+async def fetch_weather():
     lat = 50.4084
     lon = 30.3654
     url = f"https://api.openweathermap.org/data/2.5/weather?lat={lat}&lon={lon}&units=metric&lang=ua&appid={WEATHER_API_KEY}"
@@ -43,13 +46,16 @@ async def send_weather():
 
 📅 Погода у Софiївськiй Борщагiвцi:
 {desc}, {temp}°C"""
-            # Рассылка всем пользователям
-            conn = await asyncpg.connect(DATABASE_URL)
-            rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
-            for row in rows:
-                await bot.send_message(row['chat_id'], msg)
-            await conn.close()
+            return msg
 
+# Рассылка прогноза всем
+async def send_weather():
+    msg = await fetch_weather()
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("SELECT chat_id FROM weather_subscribers")
+    for row in rows:
+        await bot.send_message(row['chat_id'], msg)
+    await conn.close()
 
 # Команда /start
 @dp.message_handler(commands=["start"])
@@ -57,10 +63,11 @@ async def send_welcome(message: types.Message):
     chat_id = message.chat.id
     conn = await asyncpg.connect(DATABASE_URL)
     await conn.execute("INSERT INTO tasks (chat_id, task) VALUES ($1, $2)", chat_id, "Полити каву")
+    await conn.execute("INSERT INTO weather_subscribers (chat_id) VALUES ($1) ON CONFLICT DO NOTHING", chat_id)
     await conn.close()
     await message.answer("👋 Привiт! Я бот задач для персоналу ресторану GRECO.")
     await message.answer("🗓️ Щопонедiлка о 11:30 я буду надсилати задачi.")
-
+    await message.answer("🌤️ Щодня о 10:00 ти отримуватимеш прогноз погоди.")
 
 # Команда /task
 @dp.message_handler(commands=["task"])
@@ -76,8 +83,7 @@ async def list_tasks(message: types.Message):
     markup = InlineKeyboardMarkup().add(*buttons)
     await message.answer("📜 Список задач:", reply_markup=markup)
 
-
-# Кнопка "виконано"
+# Завершение задачи
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("done:"))
 async def mark_done(callback_query: types.CallbackQuery):
     idx = int(callback_query.data.split(":")[1])
@@ -93,32 +99,33 @@ async def mark_done(callback_query: types.CallbackQuery):
         await bot.answer_callback_query(callback_query.id, text="Задача не знайдена.")
     await conn.close()
 
+# Команда /weather
+@dp.message_handler(commands=["weather"])
+async def manual_weather(message: types.Message):
+    chat_id = message.chat.id
+    msg = await fetch_weather()
+    await message.answer(msg)
+    # Добавляем в список рассылки
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("INSERT INTO weather_subscribers (chat_id) VALUES ($1) ON CONFLICT DO NOTHING", chat_id)
+    await conn.close()
 
-# Еженедельные задачи
+# Задачи по понедельникам
 async def send_weekly_tasks():
     conn = await asyncpg.connect(DATABASE_URL)
     rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
     for row in rows:
         chat_id = row['chat_id']
-        await bot.send_message(chat_id, "👨‍🍳 ОФІЦІАНТИ: 🡢 Спецовники заповнені?")
-        await bot.send_message(chat_id, "🍸 БАРМЕНИ: 🧼 Фільтри чисті?")
+        await bot.send_message(chat_id, "👨‍🍳 ОФІЦІАНТИ: 🡢 Заповніть спецовники?")
+        await bot.send_message(chat_id, "🍸 БАРМЕНИ: 🧼 Фільтр почистили?")
     await conn.close()
 
-
-# Ручной вызов прогноза погоды
-@dp.message_handler(commands=["weather"])
-async def manual_weather(message: types.Message):
-    await send_weather()
-    await message.answer("☁️ Прогноз погоди відправлено!")
-
-
-# Запуск задач
+# При старте
 async def on_startup(dp):
     await create_tables()
     scheduler.add_job(send_weekly_tasks, CronTrigger(day_of_week='mon', hour=11, minute=30))
     scheduler.add_job(send_weather, CronTrigger(hour=10, minute=0))
     scheduler.start()
-
 
 if __name__ == '__main__':
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
