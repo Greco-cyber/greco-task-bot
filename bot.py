@@ -9,7 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 
 API_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEATHER_API_KEY = "7c50670f4a42d50802416f17b95682e1"
+WEATHER_API_KEY = os.getenv("WEATHER_API_KEY") or "7c50670f4a42d50802416f17b95682e1"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
@@ -37,10 +37,11 @@ async def send_weather():
             data = await response.json()
             temp = data['main']['temp']
             desc = data['weather'][0]['description'].capitalize()
-            msg = f"🌇 Доброго ранку!
-
-📅 Погода у Софiївськiй Борщагiвцi:
-{desc}, {temp}°C"
+            msg = (
+                f"🌇 Доброго ранку!\n\n"
+                f"📅 Погода у Софiївськiй Борщагiвцi:\n"
+                f"{desc}, {temp}°C"
+            )
             # Рассылка всем пользователям
             conn = await asyncpg.connect(DATABASE_URL)
             rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
