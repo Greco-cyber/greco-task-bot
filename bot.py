@@ -9,12 +9,13 @@ from apscheduler.triggers.cron import CronTrigger
 
 API_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-WEATHER_API_KEY = os.getenv("WEATHER_API_KEY") or "7c50670f4a42d50802416f17b95682e1"
+WEATHER_API_KEY = "7c50670f4a42d50802416f17b95682e1"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher(bot)
 scheduler = AsyncIOScheduler()
+
 
 # Создание таблицы в БД
 async def create_tables():
@@ -27,6 +28,7 @@ async def create_tables():
     """)
     await conn.close()
 
+
 # Погодная рассылка
 async def send_weather():
     lat = 50.4084
@@ -37,11 +39,10 @@ async def send_weather():
             data = await response.json()
             temp = data['main']['temp']
             desc = data['weather'][0]['description'].capitalize()
-            msg = (
-                f"🌇 Доброго ранку!\n\n"
-                f"📅 Погода у Софiївськiй Борщагiвцi:\n"
-                f"{desc}, {temp}°C"
-            )
+            msg = f"""🌇 Доброго ранку!
+
+📅 Погода у Софiївськiй Борщагiвцi:
+{desc}, {temp}°C"""
             # Рассылка всем пользователям
             conn = await asyncpg.connect(DATABASE_URL)
             rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
@@ -49,6 +50,8 @@ async def send_weather():
                 await bot.send_message(row['chat_id'], msg)
             await conn.close()
 
+
+# Команда /start
 @dp.message_handler(commands=["start"])
 async def send_welcome(message: types.Message):
     chat_id = message.chat.id
@@ -58,6 +61,8 @@ async def send_welcome(message: types.Message):
     await message.answer("👋 Привiт! Я бот задач для персоналу ресторану GRECO.")
     await message.answer("🗓️ Щопонедiлка о 11:30 я буду надсилати задачi.")
 
+
+# Команда /task
 @dp.message_handler(commands=["task"])
 async def list_tasks(message: types.Message):
     conn = await asyncpg.connect(DATABASE_URL)
@@ -71,6 +76,8 @@ async def list_tasks(message: types.Message):
     markup = InlineKeyboardMarkup().add(*buttons)
     await message.answer("📜 Список задач:", reply_markup=markup)
 
+
+# Кнопка "виконано"
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith("done:"))
 async def mark_done(callback_query: types.CallbackQuery):
     idx = int(callback_query.data.split(":")[1])
@@ -86,6 +93,8 @@ async def mark_done(callback_query: types.CallbackQuery):
         await bot.answer_callback_query(callback_query.id, text="Задача не знайдена.")
     await conn.close()
 
+
+# Еженедельные задачи
 async def send_weekly_tasks():
     conn = await asyncpg.connect(DATABASE_URL)
     rows = await conn.fetch("SELECT DISTINCT chat_id FROM tasks")
@@ -95,15 +104,21 @@ async def send_weekly_tasks():
         await bot.send_message(chat_id, "🍸 БАРМЕНИ: 🧼 Фільтри чисті?")
     await conn.close()
 
+
+# Ручной вызов прогноза погоды
+@dp.message_handler(commands=["weather"])
+async def manual_weather(message: types.Message):
+    await send_weather()
+    await message.answer("☁️ Прогноз погоди відправлено!")
+
+
+# Запуск задач
 async def on_startup(dp):
     await create_tables()
     scheduler.add_job(send_weekly_tasks, CronTrigger(day_of_week='mon', hour=11, minute=30))
     scheduler.add_job(send_weather, CronTrigger(hour=10, minute=0))
     scheduler.start()
 
+
 if __name__ == '__main__':
-    @dp.message_handler(commands=["weather"])
-async def manual_weather(message: types.Message):
-    await send_weather()
-    await message.answer("☁️ Прогноз погоди відправлено!")
     executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
