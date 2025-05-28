@@ -1,2 +1,4 @@
-aiogram==2.25.2
-apscheduler==3.10.4
+aiogram==2.25.1
+python-dotenv
+apscheduler
+asyncpg
